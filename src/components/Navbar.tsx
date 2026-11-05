@@ -70,16 +70,16 @@ export const Navbar: React.FC<NavbarProps> = ({
 
         {/* Action Controls */}
         <div className="flex items-center gap-2 sm:gap-3">
-          {/* Storage & Firebase Status Indicator */}
+          {/* Storage & Supabase Status Indicator */}
           <button
             onClick={onOpenFirebaseGuide}
-            title="Klik untuk melihat status database dan panduan koneksi Firebase / multi-device"
-            className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-850 border border-slate-800 hover:border-slate-700 text-xs text-slate-300 transition-colors"
+            title="Koneksi Database Supabase Cloud Aktif (ewvjlektdtsbjvhkgzcn.supabase.co)"
+            className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-850 border border-emerald-500/30 hover:border-emerald-500/50 text-xs text-slate-200 transition-colors shadow-sm"
           >
             <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-            <span className="hidden md:inline font-medium">Penyimpanan Lokal Aktif</span>
-            <span className="md:hidden font-medium">Lokal</span>
-            <Database className="w-3.5 h-3.5 text-purple-400 hidden sm:inline" />
+            <span className="hidden md:inline font-semibold text-emerald-300">Supabase Cloud</span>
+            <span className="md:hidden font-semibold text-emerald-300">Supabase</span>
+            <Database className="w-3.5 h-3.5 text-emerald-400 hidden sm:inline" />
           </button>
 
           {/* Add Novel Primary Button */}

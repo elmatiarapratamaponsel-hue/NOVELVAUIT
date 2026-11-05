@@ -61,7 +61,7 @@ export const Navigation: React.FC<NavigationProps> = ({
     },
     {
       id: 'firebase' as NavTab,
-      label: 'Sinkron & Cloud',
+      label: 'Supabase Cloud',
       icon: CloudCog,
       badge: null
     }

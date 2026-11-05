@@ -41,7 +41,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   const readingCount = novels.filter((n) => n.status === 'sedang_dibaca').length;
   const goalPercent = Math.min(100, Math.round((finishedCount / goal) * 100));
 
-  const handleSave = (e: React.FormEvent) => {
+  const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim()) return;
 
@@ -52,9 +52,9 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
       readingGoal: Math.max(1, goal)
     };
 
-    StorageService.saveUserProfile(updated);
+    await StorageService.saveUserProfile(updated);
     onUpdateProfile(updated);
-    onShowToast('Profil dan target membaca berhasil diperbarui!', 'success');
+    onShowToast('Profil dan target membaca berhasil diperbarui di Supabase!', 'success');
     onClose();
   };
 

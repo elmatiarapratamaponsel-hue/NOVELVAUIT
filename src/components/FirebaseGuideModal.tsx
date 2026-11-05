@@ -63,10 +63,10 @@ export const FirebaseGuideModal: React.FC<FirebaseGuideModalProps> = ({
     if (!file) return;
 
     const reader = new FileReader();
-    reader.onload = () => {
+    reader.onload = async () => {
       try {
         const text = reader.result as string;
-        const result = StorageService.importLibraryJson(text);
+        const result = await StorageService.importLibraryJson(text);
         if (result.success) {
           onShowToast(`Berhasil memulihkan ${result.count || 0} novel ke perpustakaan!`, 'success');
           onRestoreSuccess();

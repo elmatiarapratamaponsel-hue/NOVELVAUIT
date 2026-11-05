@@ -8,9 +8,10 @@ import { LibraryView } from './components/LibraryView';
 import { NovelDetailModal } from './components/NovelDetailModal';
 import { AddEditNovelModal } from './components/AddEditNovelModal';
 import { DigitalReaderModal } from './components/DigitalReaderModal';
-import { FirebaseGuideModal } from './components/FirebaseGuideModal';
+import { SupabaseSyncModal } from './components/SupabaseSyncModal';
 import { ProfileModal } from './components/ProfileModal';
 import { Toast, ToastMessage } from './components/Toast';
+import { checkSupabaseHealth } from './services/supabase';
 
 export default function App() {
   const [novels, setNovels] = useState<Novel[]>([]);
@@ -44,29 +45,46 @@ export default function App() {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   };
 
-  // Reload novels from persistent storage
-  const reloadData = useCallback(() => {
-    const list = StorageService.getNovels();
-    setNovels(list);
+  // Reload novels from persistent storage and Supabase Cloud
+  const reloadData = useCallback(async () => {
+    // Initial quick read from cache so UI is instantaneous
+    const cached = StorageService.getNovelsCache();
+    if (cached.length > 0) {
+      setNovels(cached);
+    }
     setUserProfile(StorageService.getUserProfile());
 
-    // Update selectedNovel reference if currently open
-    setSelectedNovel((curr) => {
-      if (!curr) return null;
-      return list.find((n) => n.id === curr.id) || null;
-    });
+    // Async fetch from Supabase
+    try {
+      const res = await StorageService.getNovels();
+      setNovels(res.novels);
 
-    // Update readingNovel reference if currently reading
-    setReadingNovel((curr) => {
-      if (!curr) return null;
-      return list.find((n) => n.id === curr.id) || null;
-    });
+      // Update selectedNovel reference if currently open
+      setSelectedNovel((curr) => {
+        if (!curr) return null;
+        return res.novels.find((n) => n.id === curr.id) || null;
+      });
+
+      // Update readingNovel reference if currently reading
+      setReadingNovel((curr) => {
+        if (!curr) return null;
+        return res.novels.find((n) => n.id === curr.id) || null;
+      });
+    } catch (err) {
+      console.warn('Gagal memuat dari Supabase:', err);
+    }
   }, []);
 
   useEffect(() => {
     reloadData();
 
-    // Listen to local storage changes across tabs
+    // Initial check for Supabase connectivity
+    checkSupabaseHealth().then((health) => {
+      if (health.tableExists) {
+        showToast('Terhubung ke Database Supabase Cloud ☁️', 'success');
+      }
+    });
+
     const handleStorageChange = () => reloadData();
     window.addEventListener('novelvault_storage_updated', handleStorageChange);
     window.addEventListener('novelvault_profile_updated', handleStorageChange);
@@ -74,24 +92,30 @@ export default function App() {
       window.removeEventListener('novelvault_storage_updated', handleStorageChange);
       window.removeEventListener('novelvault_profile_updated', handleStorageChange);
     };
-  }, [reloadData]);
+  }, [reloadData, showToast]);
 
   // Handle adding or updating novel
-  const handleSaveNovel = (
+  const handleSaveNovel = async (
     novelData: Omit<Novel, 'id' | 'createdAt' | 'updatedAt' | 'progressPercentage'>,
     editId?: string
   ) => {
     try {
       if (editId) {
-        const updated = StorageService.updateNovel(editId, novelData);
+        const { novel: updated, isSupabaseUpdated } = await StorageService.updateNovel(editId, novelData);
         if (updated) {
-          showToast(`Novel "${updated.title}" berhasil diperbarui!`, 'success');
+          showToast(
+            `Novel "${updated.title}" berhasil diperbarui ${isSupabaseUpdated ? '(tersimpan di Supabase Cloud)' : ''}!`,
+            'success'
+          );
         }
       } else {
-        const created = StorageService.addNovel(novelData);
-        showToast(`Novel "${created.title}" berhasil ditambahkan ke perpustakaan!`, 'success');
+        const { novel: created, isSupabaseSaved } = await StorageService.addNovel(novelData);
+        showToast(
+          `Novel "${created.title}" berhasil ditambahkan ${isSupabaseSaved ? '(tersimpan di Supabase Cloud)' : ''}!`,
+          'success'
+        );
       }
-      reloadData();
+      await reloadData();
       setEditingNovel(null);
     } catch {
       showToast('Gagal menyimpan data novel.', 'error');
@@ -99,12 +123,15 @@ export default function App() {
   };
 
   // Handle deleting novel
-  const handleDeleteNovel = (id: string) => {
+  const handleDeleteNovel = async (id: string) => {
     const novel = novels.find((n) => n.id === id);
-    const success = StorageService.deleteNovel(id);
+    const { success, isSupabaseDeleted } = await StorageService.deleteNovel(id);
     if (success) {
-      showToast(`Novel "${novel?.title || ''}" telah dihapus dari koleksi.`, 'info');
-      reloadData();
+      showToast(
+        `Novel "${novel?.title || ''}" telah dihapus ${isSupabaseDeleted ? 'dari Supabase Cloud' : ''}.`,
+        'info'
+      );
+      await reloadData();
       setSelectedNovel(null);
     } else {
       showToast('Gagal menghapus novel.', 'error');
@@ -112,23 +139,23 @@ export default function App() {
   };
 
   // Handle toggle favorite
-  const handleToggleFavorite = (e: React.MouseEvent, id: string) => {
+  const handleToggleFavorite = async (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
     const novel = novels.find((n) => n.id === id);
     if (!novel) return;
 
-    const isFavNow = StorageService.toggleFavorite(id);
+    const { isFavorite: isFavNow } = await StorageService.toggleFavorite(id);
     showToast(
       isFavNow
         ? `"${novel.title}" ditambahkan ke Novel Favorit! ❤️`
         : `"${novel.title}" dihapus dari favorit.`,
       'info'
     );
-    reloadData();
+    await reloadData();
   };
 
   // Handle reading status change
-  const handleUpdateStatus = (id: string, status: ReadingStatus) => {
+  const handleUpdateStatus = async (id: string, status: ReadingStatus) => {
     const novel = novels.find((n) => n.id === id);
     if (!novel) return;
 
@@ -141,7 +168,7 @@ export default function App() {
       newCurrentPage = 1;
     }
 
-    StorageService.updateNovel(id, { status, currentPage: newCurrentPage });
+    await StorageService.updateNovel(id, { status, currentPage: newCurrentPage });
     const statusLabel =
       status === 'selesai'
         ? 'Selesai Dibaca'
@@ -149,32 +176,32 @@ export default function App() {
         ? 'Sedang Dibaca'
         : 'Belum Dibaca';
     showToast(`Status "${novel.title}" diubah menjadi: ${statusLabel}`, 'success');
-    reloadData();
+    await reloadData();
   };
 
   // Handle reading progress update
-  const handleUpdateProgress = (id: string, page: number) => {
-    StorageService.updateProgress(id, page);
-    reloadData();
+  const handleUpdateProgress = async (id: string, page: number) => {
+    await StorageService.updateProgress(id, page);
+    await reloadData();
   };
 
   // Handle novel finished from reader
-  const handleMarkFinished = (id: string) => {
+  const handleMarkFinished = async (id: string) => {
     const novel = novels.find((n) => n.id === id);
     if (!novel) return;
-    StorageService.updateNovel(id, {
+    await StorageService.updateNovel(id, {
       status: 'selesai',
       currentPage: novel.totalPages
     });
     showToast(`Hebat! Anda telah menyelesaikan novel "${novel.title}"! 🎉`, 'success');
-    reloadData();
+    await reloadData();
   };
 
   // Handle adding notes
-  const handleAddNote = (novelId: string, text: string, page: number) => {
-    StorageService.addNote(novelId, text, page);
+  const handleAddNote = async (novelId: string, text: string, page: number) => {
+    await StorageService.addNote(novelId, text, page);
     showToast('Catatan membaca berhasil disimpan!', 'success');
-    reloadData();
+    await reloadData();
   };
 
   // Launch Digital Reader
@@ -349,11 +376,11 @@ export default function App() {
         onMarkFinished={handleMarkFinished}
       />
 
-      {/* Firebase & Multi-Device Sync Guide Modal */}
-      <FirebaseGuideModal
+      {/* Supabase Cloud Database & Multi-Device Sync Modal */}
+      <SupabaseSyncModal
         isOpen={isFirebaseGuideOpen}
         onClose={() => setIsFirebaseGuideOpen(false)}
-        onRestoreSuccess={reloadData}
+        onRefreshData={reloadData}
         onShowToast={showToast}
       />
 

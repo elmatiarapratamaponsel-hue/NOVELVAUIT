@@ -1,12 +1,23 @@
 import { Novel, ReadingStatus, UserProfile } from '../types/novel';
 import { SAMPLE_NOVELS } from '../data/sampleNovels';
+import {
+  checkSupabaseHealth,
+  fetchNovelsFromSupabase,
+  insertNovelToSupabase,
+  updateNovelInSupabase,
+  deleteNovelFromSupabase,
+  batchUpsertNovelsToSupabase,
+  fetchProfileFromSupabase,
+  saveProfileToSupabase,
+  SupabaseHealth
+} from './supabase';
 
 const STORAGE_KEY = 'novelvault_novels_v1';
 const PROFILE_KEY = 'novelvault_user_profile_v1';
 const DB_NAME = 'novelvault_files_db';
 const DB_STORE = 'novel_files';
 
-// Helper to open IndexedDB for large novel files (PDF/EPUB)
+// Helper to open IndexedDB for large files
 function openDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     if (typeof window === 'undefined' || !window.indexedDB) {
@@ -69,11 +80,11 @@ export async function deleteFileFromIndexedDB(id: string): Promise<void> {
 }
 
 export const StorageService = {
-  getNovels(): Novel[] {
+  // Synchronous cache read for instantaneous UI rendering
+  getNovelsCache(): Novel[] {
     try {
       const data = localStorage.getItem(STORAGE_KEY);
       if (!data) {
-        // First initialization
         localStorage.setItem(STORAGE_KEY, JSON.stringify(SAMPLE_NOVELS));
         return SAMPLE_NOVELS;
       }
@@ -82,28 +93,47 @@ export const StorageService = {
         return parsed;
       }
       return SAMPLE_NOVELS;
-    } catch (e) {
-      console.error('Error loading novels from storage:', e);
+    } catch {
       return SAMPLE_NOVELS;
     }
   },
 
-  getNovelById(id: string): Novel | undefined {
-    const list = this.getNovels();
-    return list.find((n) => n.id === id);
-  },
-
-  saveNovels(novels: Novel[]): void {
+  saveNovelsCache(novels: Novel[]): void {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(novels));
       window.dispatchEvent(new Event('novelvault_storage_updated'));
     } catch (e) {
-      console.error('Error saving novels:', e);
+      console.error('Error saving novels cache:', e);
     }
   },
 
-  addNovel(novelData: Omit<Novel, 'id' | 'createdAt' | 'updatedAt' | 'progressPercentage'>): Novel {
-    const novels = this.getNovels();
+  // Primary fetch: tries Supabase first; if table exists, syncs cache; else falls back to cache
+  async getNovels(): Promise<{ novels: Novel[]; isFromSupabase: boolean; error?: string }> {
+    try {
+      const health = await checkSupabaseHealth();
+      if (health.tableExists) {
+        const { data, error } = await fetchNovelsFromSupabase();
+        if (data && !error) {
+          // If Supabase table is empty on first run, auto-seed with sample novels!
+          if (data.length === 0) {
+            const cached = this.getNovelsCache();
+            await batchUpsertNovelsToSupabase(cached);
+            return { novels: cached, isFromSupabase: true };
+          }
+          this.saveNovelsCache(data);
+          return { novels: data, isFromSupabase: true };
+        }
+      }
+    } catch (e) {
+      console.warn('Supabase fetch error, using local cache:', e);
+    }
+
+    return { novels: this.getNovelsCache(), isFromSupabase: false };
+  },
+
+  async addNovel(
+    novelData: Omit<Novel, 'id' | 'createdAt' | 'updatedAt' | 'progressPercentage'>
+  ): Promise<{ novel: Novel; isSupabaseSaved: boolean }> {
     const now = new Date().toISOString();
     const totalPages = Math.max(1, Number(novelData.totalPages) || 100);
     const currentPage = Math.min(totalPages, Math.max(0, Number(novelData.currentPage) || 0));
@@ -120,15 +150,32 @@ export const StorageService = {
       lastReadAt: currentPage > 0 ? now : undefined
     };
 
-    novels.unshift(newNovel);
-    this.saveNovels(novels);
-    return newNovel;
+    // Update local cache first for instant feedback
+    const current = this.getNovelsCache();
+    current.unshift(newNovel);
+    this.saveNovelsCache(current);
+
+    // Try saving directly to Supabase
+    let isSupabaseSaved = false;
+    try {
+      const res = await insertNovelToSupabase(newNovel);
+      if (res.data) {
+        isSupabaseSaved = true;
+      }
+    } catch (err) {
+      console.warn('Could not insert to Supabase:', err);
+    }
+
+    return { novel: newNovel, isSupabaseSaved };
   },
 
-  updateNovel(id: string, updates: Partial<Novel>): Novel | null {
-    const novels = this.getNovels();
+  async updateNovel(
+    id: string,
+    updates: Partial<Novel>
+  ): Promise<{ novel: Novel | null; isSupabaseUpdated: boolean }> {
+    const novels = this.getNovelsCache();
     const index = novels.findIndex((n) => n.id === id);
-    if (index === -1) return null;
+    if (index === -1) return { novel: null, isSupabaseUpdated: false };
 
     const current = novels[index];
     const totalPages = updates.totalPages !== undefined ? Math.max(1, Number(updates.totalPages)) : current.totalPages;
@@ -136,7 +183,6 @@ export const StorageService = {
     currentPage = Math.min(totalPages, Math.max(0, currentPage));
     const progressPercentage = Math.round((currentPage / totalPages) * 100);
 
-    // Auto-derive status if progress completes or starts
     let status = updates.status || current.status;
     if (updates.currentPage !== undefined && !updates.status) {
       if (currentPage >= totalPages) {
@@ -157,33 +203,55 @@ export const StorageService = {
     };
 
     novels[index] = updated;
-    this.saveNovels(novels);
-    return updated;
+    this.saveNovelsCache(novels);
+
+    // Update in Supabase
+    let isSupabaseUpdated = false;
+    try {
+      const res = await updateNovelInSupabase(id, updated);
+      if (res.data) isSupabaseUpdated = true;
+    } catch (err) {
+      console.warn('Could not update in Supabase:', err);
+    }
+
+    return { novel: updated, isSupabaseUpdated };
   },
 
-  deleteNovel(id: string): boolean {
-    const novels = this.getNovels();
+  async deleteNovel(id: string): Promise<{ success: boolean; isSupabaseDeleted: boolean }> {
+    const novels = this.getNovelsCache();
     const filtered = novels.filter((n) => n.id !== id);
     if (filtered.length !== novels.length) {
-      this.saveNovels(filtered);
+      this.saveNovelsCache(filtered);
       deleteFileFromIndexedDB(id);
-      return true;
+
+      let isSupabaseDeleted = false;
+      try {
+        const res = await deleteNovelFromSupabase(id);
+        isSupabaseDeleted = res.success;
+      } catch (err) {
+        console.warn('Could not delete from Supabase:', err);
+      }
+
+      return { success: true, isSupabaseDeleted };
     }
-    return false;
+    return { success: false, isSupabaseDeleted: false };
   },
 
-  toggleFavorite(id: string): boolean {
-    const novel = this.getNovelById(id);
-    if (!novel) return false;
+  async toggleFavorite(id: string): Promise<{ isFavorite: boolean; novel: Novel | null }> {
+    const novels = this.getNovelsCache();
+    const novel = novels.find((n) => n.id === id);
+    if (!novel) return { isFavorite: false, novel: null };
+
     const newStatus = !novel.isFavorite;
-    this.updateNovel(id, { isFavorite: newStatus });
-    return newStatus;
+    const { novel: updated } = await this.updateNovel(id, { isFavorite: newStatus });
+    return { isFavorite: newStatus, novel: updated };
   },
 
-  updateProgress(id: string, currentPage: number): Novel | null {
-    const novel = this.getNovelById(id);
+  async updateProgress(id: string, currentPage: number): Promise<Novel | null> {
+    const novels = this.getNovelsCache();
+    const novel = novels.find((n) => n.id === id);
     if (!novel) return null;
-    
+
     let status: ReadingStatus = novel.status;
     if (currentPage >= novel.totalPages) {
       status = 'selesai';
@@ -191,15 +259,17 @@ export const StorageService = {
       status = 'sedang_dibaca';
     }
 
-    return this.updateNovel(id, {
+    const { novel: updated } = await this.updateNovel(id, {
       currentPage,
       status,
       lastReadAt: new Date().toISOString()
     });
+    return updated;
   },
 
-  addNote(novelId: string, text: string, page: number, chapterTitle?: string): Novel | null {
-    const novel = this.getNovelById(novelId);
+  async addNote(novelId: string, text: string, page: number, chapterTitle?: string): Promise<Novel | null> {
+    const novels = this.getNovelsCache();
+    const novel = novels.find((n) => n.id === novelId);
     if (!novel) return null;
 
     const note = {
@@ -211,18 +281,15 @@ export const StorageService = {
     };
 
     const notes = novel.notes ? [note, ...novel.notes] : [note];
-    return this.updateNovel(novelId, { notes });
+    const { novel: updated } = await this.updateNovel(novelId, { notes });
+    return updated;
   },
 
   getUserProfile(): UserProfile {
     try {
       const data = localStorage.getItem(PROFILE_KEY);
-      if (data) {
-        return JSON.parse(data);
-      }
-    } catch {
-      // fallback
-    }
+      if (data) return JSON.parse(data);
+    } catch {}
     return {
       name: 'Budi Santoso',
       email: 'budi.kolektor@novelvault.id',
@@ -232,21 +299,23 @@ export const StorageService = {
     };
   },
 
-  saveUserProfile(profile: UserProfile): void {
+  async saveUserProfile(profile: UserProfile): Promise<void> {
     try {
       localStorage.setItem(PROFILE_KEY, JSON.stringify(profile));
       window.dispatchEvent(new Event('novelvault_profile_updated'));
+      await saveProfileToSupabase(profile);
     } catch (e) {
       console.error('Error saving profile:', e);
     }
   },
 
   exportLibraryJson(): string {
-    const novels = this.getNovels();
+    const novels = this.getNovelsCache();
     const profile = this.getUserProfile();
     const exportData = {
       app: 'NOVELVAULT',
-      version: '1.0.0',
+      version: '2.0.0-supabase',
+      database: 'Supabase PostgreSQL',
       exportedAt: new Date().toISOString(),
       user: profile,
       totalNovels: novels.length,
@@ -255,7 +324,7 @@ export const StorageService = {
     return JSON.stringify(exportData, null, 2);
   },
 
-  importLibraryJson(jsonString: string): { success: boolean; count?: number; error?: string } {
+  async importLibraryJson(jsonString: string): Promise<{ success: boolean; count?: number; error?: string }> {
     try {
       const parsed = JSON.parse(jsonString);
       let list: Novel[] = [];
@@ -271,17 +340,26 @@ export const StorageService = {
         return { success: false, error: 'Tidak ada data novel yang ditemukan dalam file cadangan.' };
       }
 
-      // Merge or replace
-      this.saveNovels(list);
+      this.saveNovelsCache(list);
+      // Batch sync to Supabase
+      try {
+        await batchUpsertNovelsToSupabase(list);
+      } catch (err) {
+        console.warn('Could not sync imported novels to Supabase:', err);
+      }
+
       return { success: true, count: list.length };
     } catch (e) {
       return { success: false, error: 'Gagal mengurai file JSON: ' + (e instanceof Error ? e.message : 'Format rusak') };
     }
   },
 
-  resetToDefault(): Novel[] {
+  async resetToDefault(): Promise<Novel[]> {
     localStorage.removeItem(STORAGE_KEY);
     localStorage.setItem(STORAGE_KEY, JSON.stringify(SAMPLE_NOVELS));
+    try {
+      await batchUpsertNovelsToSupabase(SAMPLE_NOVELS);
+    } catch {}
     window.dispatchEvent(new Event('novelvault_storage_updated'));
     return SAMPLE_NOVELS;
   }
