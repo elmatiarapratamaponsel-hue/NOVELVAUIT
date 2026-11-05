@@ -1,0 +1,6 @@
+{
+  "name": "NOVELVAULT – Your Personal Digital Novel Library",
+  "description": "Perpustakaan novel digital pribadi untuk mengelola koleksi, membaca buku secara digital, dan melacak progres membaca.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
